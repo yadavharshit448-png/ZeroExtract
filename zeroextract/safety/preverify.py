@@ -52,7 +52,12 @@ class PreflightShield:
 
         try:
             with open(p, "rb") as f:
-                magic = f.read(4)
+                sig8 = f.read(8)
+                if sig8.startswith(b"Rar!\x1a\x07"):
+                    # RAR Archive Preflight Verification
+                    return self._verify_rar_archive(p)
+
+                magic = sig8[:4]
                 if not (magic.startswith(b"PK\x03\x04") or magic.startswith(b"PK\x05\x06") or magic.startswith(b"PK\x07\x08")):
                     return False, [f"Invalid ZIP magic bytes: {magic!r}"]
 
@@ -127,6 +132,46 @@ class PreflightShield:
 
         is_valid = len(errors) == 0
         return is_valid, errors
+
+    def _verify_rar_archive(self, archive_path: Path) -> tuple[bool, list[str]]:
+        """Verifies RAR archive integrity non-destructively in memory."""
+        import shutil
+        import subprocess
+
+        # Check for unrar binary
+        unrar_bin = None
+        for p in [r"C:\Program Files\WinRAR\UnRAR.exe", r"C:\Program Files (x86)\WinRAR\UnRAR.exe"]:
+            if os.path.isfile(p):
+                unrar_bin = p
+                break
+        if not unrar_bin:
+            unrar_bin = shutil.which("unrar") or shutil.which("UnRAR")
+
+        if unrar_bin:
+            try:
+                res = subprocess.run(
+                    [unrar_bin, "t", "-idq", str(archive_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                if res.returncode == 0:
+                    return True, []
+                else:
+                    err = res.stderr.decode("utf-8", errors="replace").strip()
+                    return False, [f"RAR integrity test failed: {err or 'CRC or header corruption detected'}"]
+            except Exception as exc:
+                return False, [f"RAR testing error: {exc}"]
+
+        # Fallback to header inspection
+        try:
+            from zeroextract.formats.rar_sparse import parse_rar5_entries
+            with open(archive_path, "rb") as f:
+                entries = parse_rar5_entries(f)
+                if not entries:
+                    return False, ["RAR archive contains no valid file headers"]
+            return True, []
+        except Exception as e:
+            return False, [f"RAR structure error: {e}"]
 
 
 __all__ = ["PreflightShield"]

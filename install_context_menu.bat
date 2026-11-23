@@ -6,23 +6,27 @@ echo ========================================================
 echo.
 
 set SCRIPT_DIR=%~dp0
-set LAUNCHER=%SCRIPT_DIR%zeroextract.bat
+set INSTALL_DIR=%LOCALAPPDATA%\Programs\ZeroExtract
 
-REM Check if standalone exe exists, prefer exe if present
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+
+REM Install to standard user application folder to prevent Deny-ACL permission issues
 if exist "%SCRIPT_DIR%dist\zeroextract.exe" (
-    set LAUNCHER=%SCRIPT_DIR%dist\zeroextract.exe
+    echo Installing ZeroExtract to: %INSTALL_DIR%
+    copy /y "%SCRIPT_DIR%dist\zeroextract.exe" "%INSTALL_DIR%\zeroextract.exe" >nul
+    copy /y "%SCRIPT_DIR%zeroextract.ico" "%INSTALL_DIR%\zeroextract.ico" >nul 2>&1
+    set LAUNCHER=%INSTALL_DIR%\zeroextract.exe
+    set ICON_ARG=%INSTALL_DIR%\zeroextract.ico
+) else (
+    set LAUNCHER=%SCRIPT_DIR%zeroextract.bat
+    set ICON_ARG=%SCRIPT_DIR%zeroextract.ico
 )
 
 echo Registering right-click context menu for current user...
 echo Target Launcher: %LAUNCHER%
 echo.
 
-REM Add to all archive file types under Current User registry (no Admin required)
-set ICON_ARG=%SCRIPT_DIR%zeroextract.ico
-if not exist "%ICON_ARG%" (
-    set ICON_ARG=%LAUNCHER%,0
-)
-
+REM Register context menu for all archive file types (.zip, .rar, .7z, and *)
 reg add "HKCU\Software\Classes\SystemFileAssociations\.zip\Shell\ZeroExtract" /ve /d "Extract with ZeroExtract (No Extra Space)" /f >nul
 reg add "HKCU\Software\Classes\SystemFileAssociations\.zip\Shell\ZeroExtract" /v "Icon" /d "\"%ICON_ARG%\"" /f >nul
 reg add "HKCU\Software\Classes\SystemFileAssociations\.zip\Shell\ZeroExtract\command" /ve /d "cmd.exe /k \"\"%LAUNCHER%\" \"%%1\"\"" /f >nul

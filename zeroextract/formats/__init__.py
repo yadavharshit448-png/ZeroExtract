@@ -14,6 +14,11 @@ from zeroextract.formats.multi_volume import (
     MultiVolumeStreamReader,
     VolumeInfo,
 )
+from zeroextract.formats.rar_sparse import (
+    RarFileEntry,
+    RarSparseExtractor,
+    is_rar_file,
+)
 from zeroextract.formats.zip_reverse import (
     BadZipSignatureError,
     ChecksumError,
@@ -38,4 +43,7 @@ __all__ = [
     "MultiVolumeStreamReader",
     "VolumeInfo",
     "ChunkedSparseExtractor",
+    "RarSparseExtractor",
+    "is_rar_file",
+    "RarFileEntry",
 ]

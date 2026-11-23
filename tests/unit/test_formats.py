@@ -492,3 +492,35 @@ class TestChunkedSparseExtractor:
         result_file = out_dir / "sparse_payload.bin"
         assert result_file.exists()
         assert result_file.stat().st_size == virtual_size
+
+
+class TestRarSupport:
+    """Unit tests for RAR format detection and sparse parsing."""
+
+    def test_is_rar_file_detection(self, tmp_path: Path) -> None:
+        from zeroextract.formats.rar_sparse import is_rar_file
+
+        fake_rar5 = tmp_path / "fake5.rar"
+        fake_rar5.write_bytes(b"Rar!\x1a\x07\x01\x00\x00\x00extra_payload")
+        assert is_rar_file(fake_rar5) is True
+
+        fake_rar4 = tmp_path / "fake4.rar"
+        fake_rar4.write_bytes(b"Rar!\x1a\x07\x00\x00\x00\x00extra_payload")
+        assert is_rar_file(fake_rar4) is True
+
+        fake_zip = tmp_path / "fake.zip"
+        fake_zip.write_bytes(b"PK\x03\x04\x00\x00\x00\x00")
+        assert is_rar_file(fake_zip) is False
+
+        non_existent = tmp_path / "missing.rar"
+        assert is_rar_file(non_existent) is False
+
+    def test_rar_preflight_shield_integration(self, tmp_path: Path) -> None:
+        from zeroextract.safety.preverify import PreflightShield
+
+        shield = PreflightShield()
+        # Invalid tiny RAR
+        corrupt_rar = tmp_path / "corrupt.rar"
+        corrupt_rar.write_bytes(b"Rar!\x1a\x07\x01\x00\xff\xff")
+        valid, errors = shield.verify_archive(corrupt_rar)
+        assert valid is False or len(errors) > 0

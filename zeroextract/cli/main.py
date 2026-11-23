@@ -13,6 +13,7 @@ from zeroextract import __version__
 from zeroextract.cli.ui import TerminalUI
 from zeroextract.cli.windows_setup import normalize_windows_path
 from zeroextract.formats.multi_volume import MultiVolumeStreamer
+from zeroextract.formats.rar_sparse import RarSparseExtractor, is_rar_file
 from zeroextract.formats.zip_reverse import ZipReverseExtractor
 from zeroextract.fs.headroom import HeadroomMonitor
 from zeroextract.safety.atomic import AtomicWriter
@@ -57,8 +58,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-headroom",
         type=int,
-        default=50 * 1024 * 1024,
-        help="Minimum free disk space cushion in bytes (default: 52428800).",
+        default=10 * 1024 * 1024,
+        help="Minimum free disk space cushion in bytes (default: 10485760).",
     )
     parser.add_argument(
         "--gui",
@@ -136,16 +137,28 @@ def extract_single_archive(
             ui.render_error(f"Archive corruption detected in '{archive_path.name}': {err_details}")
             return 1
 
+    is_rar = is_rar_file(archive_path)
+
     # Dry-run simulation mode
     if dry_run:
-        try:
-            with zipfile.ZipFile(archive_path, "r") as zf:
-                infolist = zf.infolist()
-                total_uncomp = sum(i.file_size for i in infolist)
-                member_count = len(infolist)
-        except Exception:
-            member_count = 0
-            total_uncomp = archive_path.stat().st_size
+        if is_rar:
+            try:
+                rar_ext = RarSparseExtractor(archive_path)
+                entries = rar_ext.get_entries()
+                total_uncomp = sum(e.unpacked_size for e in entries)
+                member_count = len(entries)
+            except Exception:
+                member_count = 0
+                total_uncomp = archive_path.stat().st_size
+        else:
+            try:
+                with zipfile.ZipFile(archive_path, "r") as zf:
+                    infolist = zf.infolist()
+                    total_uncomp = sum(i.file_size for i in infolist)
+                    member_count = len(infolist)
+            except Exception:
+                member_count = 0
+                total_uncomp = archive_path.stat().st_size
 
         ui.render_info(
             f"[Dry-Run] Archive '{archive_path.name}' verified intact. "
@@ -181,7 +194,23 @@ def extract_single_archive(
     writer.clean_stale_parts(out_dir)
 
     try:
-        if is_multi:
+        if is_rar:
+            ui.render_info(f"Extracting RAR archive in-place with NTFS sparse hole-punching: {archive_path.name}...")
+            rar_ext = RarSparseExtractor(archive_path)
+            total_sz = archive_path.stat().st_size
+            def rar_progress(name: str, done: int, total_unp: int, total_pk: int):
+                remaining = max(0, total_sz - (done * total_pk // max(1, total_unp)))
+                ui.render_progress(
+                    current_file=name,
+                    bytes_extracted=done,
+                    total_bytes=total_unp,
+                    archive_bytes_remaining=remaining,
+                )
+            extracted_count = rar_ext.extract(out_dir, progress_cb=rar_progress)
+            ui.render_success(f"Successfully extracted {extracted_count} files from '{archive_path.name}' into '{out_dir}'.")
+            journal.clear()
+            return 0
+        elif is_multi:
             ui.render_info(f"Extracting multi-volume sequence ({len(streamer.volumes)} volumes)...")
             streamer.extract(
                 output_dir=str(out_dir),
