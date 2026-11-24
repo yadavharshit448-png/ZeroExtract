@@ -197,18 +197,15 @@ def extract_single_archive(
         if is_rar:
             ui.render_info(f"Extracting RAR archive in-place with NTFS sparse hole-punching: {archive_path.name}...")
             rar_ext = RarSparseExtractor(archive_path)
-            total_sz = archive_path.stat().st_size
             def rar_progress(name: str, done: int, total_unp: int, total_pk: int):
-                remaining = max(0, total_sz - (done * total_pk // max(1, total_unp)))
                 ui.render_progress(
-                    current_file=name,
-                    bytes_extracted=done,
-                    total_bytes=total_unp,
-                    archive_bytes_remaining=remaining,
+                    current_bytes=done,
+                    total_bytes=max(1, total_unp),
+                    current_member=name,
                 )
             extracted_count = rar_ext.extract(out_dir, progress_cb=rar_progress)
-            ui.render_success(f"Successfully extracted {extracted_count} files from '{archive_path.name}' into '{out_dir}'.")
-            journal.clear()
+            ui.render_info(f"Successfully extracted {extracted_count} files from '{archive_path.name}' into '{out_dir}'.")
+            journal.close(success=True)
             return 0
         elif is_multi:
             ui.render_info(f"Extracting multi-volume sequence ({len(streamer.volumes)} volumes)...")
