@@ -6,6 +6,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Sequence
 import zipfile
 
@@ -234,6 +235,7 @@ def extract_single_archive(
                     for d in saved_entries
                 ]
                 extractor = ZipReverseExtractor(str(archive_path), chunk_size=chunk_size, entries=planned_zip_entries)
+                scanned = planned_zip_entries
             else:
                 extractor = ZipReverseExtractor(str(archive_path), chunk_size=chunk_size)
                 scanned = extractor.scan_central_directory()
@@ -254,11 +256,41 @@ def extract_single_archive(
                     for e in scanned
                 ])
 
-            ui.render_info(f"Extracting '{archive_path.name}' via reverse tail-truncation...")
+            ui.render_info(f"Extracting '{archive_path.name}' via reverse tail-truncation + sparse hole-punching...")
+            total_uncomp = sum(e.uncompressed_size for e in scanned)
+            start_time = time.monotonic()
+            completed_bytes = 0
+
+            def zip_bytes_progress(chunk_delta: int, member_name: str) -> None:
+                nonlocal completed_bytes
+                completed_bytes += chunk_delta
+                elapsed = max(0.001, time.monotonic() - start_time)
+                speed = completed_bytes / elapsed
+                rem = max(0, total_uncomp - completed_bytes)
+                eta = (rem / speed) if speed > 0 else float("inf")
+                ui.render_progress(
+                    current_bytes=min(completed_bytes, max(0, total_uncomp - 1)),
+                    total_bytes=max(1, total_uncomp),
+                    current_member=member_name,
+                    speed=speed,
+                    eta=eta,
+                )
+
             extractor.extract(
                 output_dir=str(out_dir),
                 on_member_extracted=lambda member: journal.mark_completed(member, 0, 0),
+                on_bytes_progress=zip_bytes_progress,
             )
+            if total_uncomp > 0:
+                elapsed = max(0.001, time.monotonic() - start_time)
+                ui.render_progress(
+                    current_bytes=total_uncomp,
+                    total_bytes=total_uncomp,
+                    current_member="",
+                    speed=total_uncomp / elapsed,
+                    eta=0.0,
+                    force=True,
+                )
 
         # Successful completion - remove journal
         journal.close(success=True)
@@ -266,6 +298,10 @@ def extract_single_archive(
         return 0
 
     except Exception as exc:
+        try:
+            journal.close(success=False)
+        except Exception:
+            pass
         ui.render_error(f"Extraction failed: {exc}")
         return 1
 

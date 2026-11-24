@@ -17,6 +17,7 @@ import sys
 from typing import Any, BinaryIO, Callable, Optional
 import zlib
 
+from zeroextract.fs.sparse import SparseError, SparsePuncher
 from zeroextract.fs.truncator import ReverseTruncator, TruncateError
 
 logger = logging.getLogger(__name__)
@@ -113,18 +114,39 @@ def _sanitize_path(filename: str, output_dir: Path) -> Path:
     return target
 
 
+def _read_exact(f: BinaryIO, length: int) -> bytes:
+    """Reads up to length bytes cleanly across buffered or unbuffered FileIO streams."""
+    buf = f.read(length)
+    if len(buf) == length or len(buf) == 0:
+        return buf
+    parts = [buf]
+    rem = length - len(buf)
+    while rem > 0:
+        more = f.read(rem)
+        if not more:
+            break
+        parts.append(more)
+        rem -= len(more)
+    return b"".join(parts)
+
+
 class ZipReverseExtractor:
     """Central Directory caching and tail-to-head reverse extractor with lockstep truncation."""
 
     DEFAULT_CHUNK_SIZE: int = 1024 * 1024  # 1 MB
+    SPARSE_CLUSTER_SIZE: int = 65536  # 64 KB NTFS sparse cluster boundary
+    DEFAULT_SPARSE_THRESHOLD: int = 2 * 1024 * 1024  # 2 MB minimum compressed stream for intra-entry punching
 
     def __init__(
         self,
         archive_path: str | os.PathLike | None = None,
         reclaimer: Any = None,
         truncator: ReverseTruncator | None = None,
+        puncher: SparsePuncher | None = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         entries: list[ZipEntry] | None = None,
+        enable_intra_entry_sparse: bool = True,
+        sparse_punch_threshold: int = DEFAULT_SPARSE_THRESHOLD,
     ) -> None:
         self.archive_path = os.fspath(archive_path) if archive_path is not None else None
         if truncator is not None:
@@ -133,8 +155,16 @@ class ZipReverseExtractor:
             self.truncator = reclaimer.truncator
         else:
             self.truncator = ReverseTruncator()
+        if puncher is not None:
+            self.puncher = puncher
+        elif reclaimer is not None and hasattr(reclaimer, "sparse"):
+            self.puncher = reclaimer.sparse
+        else:
+            self.puncher = SparsePuncher()
         self.chunk_size = max(65536, chunk_size)
         self._entries: list[ZipEntry] | None = entries
+        self.enable_intra_entry_sparse = enable_intra_entry_sparse
+        self.sparse_punch_threshold = sparse_punch_threshold
 
     def scan_central_directory(self, archive_path: str | os.PathLike | None = None) -> list[ZipEntry]:
         """Parses EOCD / Zip64 EOCD and returns entries sorted descending by local_header_offset."""
@@ -367,6 +397,8 @@ class ZipReverseExtractor:
         entry: ZipEntry,
         output_dir: str | os.PathLike,
         archive_file: BinaryIO | None = None,
+        enable_sparse: bool = False,
+        on_bytes_progress: Optional[Callable[[int, str], None]] = None,
     ) -> str:
         """Extracts a single entry, validates CRC32, and atomically stages the file."""
         out_root = Path(output_dir).resolve()
@@ -396,7 +428,7 @@ class ZipReverseExtractor:
         temp_target = target.with_name(target.name + ".unpack_part")
         try:
             f.seek(entry.local_header_offset)
-            lfh_buf = f.read(30)
+            lfh_buf = _read_exact(f, 30)
             if len(lfh_buf) < 30 or not lfh_buf.startswith(SIG_LFH):
                 raise BadZipSignatureError(
                     f"Invalid Local File Header at offset {entry.local_header_offset} for '{entry.filename}'"
@@ -419,6 +451,18 @@ class ZipReverseExtractor:
             running_crc = 0
             bytes_written = 0
             remaining_comp = entry.compressed_size
+            stream_pos = data_offset
+
+            cluster_size = self.SPARSE_CLUSTER_SIZE
+            last_punched_end = ((data_offset + cluster_size - 1) // cluster_size) * cluster_size
+            punch_batch = ((max(self.chunk_size, 2 * 1024 * 1024) + cluster_size - 1) // cluster_size) * cluster_size
+            sparse_active = enable_sparse and entry.compressed_size >= cluster_size
+            if sparse_active:
+                try:
+                    self.puncher.mark_as_sparse(f)
+                except (SparseError, OSError) as exc:
+                    logger.debug("Sparse mark disabled for '%s': %s", entry.filename, exc)
+                    sparse_active = False
 
             # Windows long path handling
             target_str = str(temp_target)
@@ -428,12 +472,13 @@ class ZipReverseExtractor:
             with open(target_str, "wb") as out_f:
                 while remaining_comp > 0:
                     read_len = min(self.chunk_size, remaining_comp)
-                    chunk = f.read(read_len)
+                    chunk = _read_exact(f, read_len)
                     if len(chunk) < read_len:
                         raise CorruptArchiveError(
                             f"Unexpected EOF reading compressed stream for '{entry.filename}'"
                         )
                     remaining_comp -= len(chunk)
+                    stream_pos += len(chunk)
 
                     if decompressor is None:
                         out_chunk = chunk
@@ -449,6 +494,19 @@ class ZipReverseExtractor:
                         out_f.write(out_chunk)
                         running_crc = zlib.crc32(out_chunk, running_crc) & 0xFFFFFFFF
                         bytes_written += len(out_chunk)
+                        if on_bytes_progress is not None:
+                            on_bytes_progress(len(out_chunk), entry.filename)
+
+                    if sparse_active:
+                        aligned_end = (stream_pos // cluster_size) * cluster_size
+                        pending_len = aligned_end - last_punched_end
+                        if pending_len >= punch_batch or (remaining_comp == 0 and pending_len > 0):
+                            try:
+                                self.puncher.punch_hole(f, last_punched_end, pending_len, cluster_size=cluster_size)
+                                last_punched_end = aligned_end
+                            except (SparseError, OSError) as exc:
+                                logger.warning("Intra-entry sparse punch failed for '%s': %s", entry.filename, exc)
+                                sparse_active = False
 
                 if decompressor is not None:
                     try:
@@ -461,6 +519,8 @@ class ZipReverseExtractor:
                         out_f.write(trailing)
                         running_crc = zlib.crc32(trailing, running_crc) & 0xFFFFFFFF
                         bytes_written += len(trailing)
+                        if on_bytes_progress is not None:
+                            on_bytes_progress(len(trailing), entry.filename)
 
                 out_f.flush()
                 os.fsync(out_f.fileno())
@@ -512,6 +572,7 @@ class ZipReverseExtractor:
         output_dir: str | os.PathLike,
         on_progress: Optional[Callable[[ZipEntry, int, int, int, int], None]] = None,
         on_member_extracted: Optional[Callable[[str], None]] = None,
+        on_bytes_progress: Optional[Callable[[int, str], None]] = None,
     ) -> list[str]:
         """Extracts entries strictly tail-to-head and truncates archive in lockstep."""
         path = self.archive_path
@@ -526,13 +587,29 @@ class ZipReverseExtractor:
         cumulative_freed = 0
         total_count = len(entries)
 
-        with open(path, "r+b") as arch_file:
+        sparse_supported = False
+        if self.enable_intra_entry_sparse:
+            try:
+                sparse_supported = self.puncher.is_sparse_supported(path)
+            except Exception:
+                sparse_supported = False
+
+        with open(path, "r+b", buffering=0) as arch_file:
             for idx, entry in enumerate(entries):
                 target = _sanitize_path(entry.filename, Path(output_dir))
                 if target.exists() and not entry.is_dir and target.stat().st_size == entry.uncompressed_size:
                     extracted_paths.append(str(target))
+                    if on_bytes_progress is not None and entry.uncompressed_size > 0:
+                        on_bytes_progress(entry.uncompressed_size, entry.filename)
                 else:
-                    dest_path = self.extract_entry(entry, output_dir, archive_file=arch_file)
+                    use_sparse = sparse_supported and (entry.compressed_size >= self.sparse_punch_threshold)
+                    dest_path = self.extract_entry(
+                        entry,
+                        output_dir,
+                        archive_file=arch_file,
+                        enable_sparse=use_sparse,
+                        on_bytes_progress=on_bytes_progress,
+                    )
                     extracted_paths.append(dest_path)
 
                 if on_member_extracted is not None:
@@ -558,6 +635,7 @@ class ZipReverseExtractor:
         output_dir: str | os.PathLike | None = None,
         on_progress: Optional[Callable] = None,
         on_member_extracted: Optional[Callable[[str], None]] = None,
+        on_bytes_progress: Optional[Callable[[int, str], None]] = None,
     ) -> list[str]:
         """Convenience method for extraction with optional archive_path override."""
         if archive_path is not None:
@@ -568,4 +646,5 @@ class ZipReverseExtractor:
             output_dir,
             on_progress=on_progress,
             on_member_extracted=on_member_extracted,
+            on_bytes_progress=on_bytes_progress,
         )

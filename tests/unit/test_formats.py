@@ -195,6 +195,62 @@ class TestZipReverseExtractor:
         with pytest.raises(UnsupportedCompressionError):
             extractor.extract_all(out_dir)
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Requires Windows NTFS sparse file support")
+    def test_intra_entry_sparse_hole_punching_large_member(self, tmp_path: Path) -> None:
+        """Verifies large compressed entries trigger intra-entry sparse hole punching during extraction."""
+        puncher = SparsePuncher()
+        if not puncher.is_sparse_supported(tmp_path):
+            pytest.skip("Volume does not support sparse files.")
+
+        zip_file = tmp_path / "large_sparse_entry.zip"
+        out_dir = tmp_path / "out_large_sparse"
+
+        # Build an 8 MB incompressible payload (like encrypted/compressed game .ucas files)
+        # so DEFLATE output exceeds 8 MB and triggers intra-entry sparse hole punching.
+        payload = os.urandom(8 * 1024 * 1024)
+        files = {
+            "small_head.txt": b"head_entry_data",
+            "Assets/huge_incompressible.ucas": payload,
+            "small_tail.txt": b"tail_entry_data",
+        }
+        create_simple_zip(zip_file, files, compression=zipfile.ZIP_DEFLATED)
+
+        # Wrap punch_hole to track real calls + mid-entry NTFS free space/allocation drop
+        punch_calls: list[tuple[int, int]] = []
+        alloc_snapshots: list[int] = [get_allocated_file_size(zip_file)]
+        orig_punch = puncher.punch_hole
+
+        def spy_punch(handle, offset: int, length: int, cluster_size: int = 65536) -> int:
+            punched = orig_punch(handle, offset, length, cluster_size=cluster_size)
+            punch_calls.append((offset, punched))
+            alloc_snapshots.append(get_allocated_file_size(zip_file))
+            return punched
+
+        puncher.punch_hole = spy_punch  # type: ignore[method-assign]
+
+        byte_events: list[int] = []
+        extractor = ZipReverseExtractor(
+            zip_file,
+            puncher=puncher,
+            chunk_size=1024 * 1024,
+            sparse_punch_threshold=2 * 1024 * 1024,
+        )
+        extracted = extractor.extract_all(
+            out_dir,
+            on_bytes_progress=lambda delta, name: byte_events.append(delta),
+        )
+
+        assert len(extracted) == 3
+        assert len(punch_calls) >= 2, f"Expected multiple intra-entry sparse hole punches, got {punch_calls}"
+        assert alloc_snapshots[-1] < alloc_snapshots[0], (
+            f"Expected allocated NTFS size of archive to shrink mid-entry: {alloc_snapshots}"
+        )
+        assert sum(byte_events) == sum(len(v) for v in files.values())
+        assert zip_file.stat().st_size == 0
+
+        verif = verify_directory_contents(out_dir, files)
+        assert verif.is_valid, f"Verification errors: {verif.errors}"
+
 
 # ===========================================================================
 # 2. MultiVolumeStreamer Unit Tests

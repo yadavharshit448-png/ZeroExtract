@@ -220,18 +220,26 @@ def launch_gui(initial_archive: str | None = None) -> int:
         class GuiUI(TerminalUI):
             def render_info(self, msg: str) -> None:
                 log_queue.put(("INFO", msg))
-                root.after(0, lambda: status_var.set(msg))
+                root.after(0, lambda m=msg: status_var.set(m))
 
             def render_error(self, msg: str) -> None:
                 log_queue.put(("ERROR", msg))
-                root.after(0, lambda: status_var.set(f"Error: {msg}"))
+                root.after(0, lambda m=msg: status_var.set(f"Error: {m}"))
 
-            def render_progress(self, current: int, total: int, filename: str = "", speed: float = 0.0, eta: float = 0.0, force: bool = False) -> None:
-                pct = (current / total * 100.0) if total > 0 else 100.0
+            def render_progress(
+                self,
+                current_bytes: int,
+                total_bytes: int,
+                current_member: str = "",
+                speed: float = 0.0,
+                eta: float = 0.0,
+                force: bool = False,
+            ) -> None:
+                pct = (current_bytes / total_bytes * 100.0) if total_bytes > 0 else 100.0
                 spd_str = self.format_throughput(speed)
                 eta_str = self.format_eta(eta)
-                root.after(0, lambda: progress_bar.configure(value=pct))
-                root.after(0, lambda: speed_eta_var.set(f"{spd_str} | ETA: {eta_str}"))
+                root.after(0, lambda p=pct: progress_bar.configure(value=p))
+                root.after(0, lambda s=spd_str, e=eta_str: speed_eta_var.set(f"{s} | ETA: {e}"))
 
         gui_ui = GuiUI(quiet=False)
         try:
@@ -241,7 +249,7 @@ def launch_gui(initial_archive: str | None = None) -> int:
                 dry_run=is_dry,
                 no_verify=no_ver,
                 chunk_size=1048576,
-                min_headroom=50 * 1024 * 1024,
+                min_headroom=10 * 1024 * 1024,
                 ui=gui_ui,
             )
 
