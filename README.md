@@ -4,7 +4,7 @@
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-247%20Passed%20(100%25)-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-250%20Passed%20(100%25)-brightgreen.svg)]()
 [![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)]()
 
 ---
@@ -88,22 +88,32 @@ ZeroExtract utilizes a multi-layered filesystem and compression pipeline:
 
 ---
 
-## 📥 Installation
+## 📥 Download & Installation
 
-### Option 1: Standard Installation
+### Option 1: Windows Standalone App (Recommended — No Python Needed)
+1. Download the latest **`zeroextract.exe`** from the [**GitHub Releases**](https://github.com/yadavharshit448-png/zeroextract/releases) page.
+2. Double-click or run `zeroextract.exe --gui` for the desktop interface, or extract directly from terminal:
+   ```cmd
+   zeroextract.exe "D:\Downloads\GameArchive.zip"
+   ```
+3. *(Optional)* Download the repo/scripts and double-click **`install_context_menu.bat`** to add **"Extract with ZeroExtract (No Extra Space)"** to your Windows Explorer right-click menu for `.zip`, `.rar`, and `.7z` files.
+
+### Option 2: Install from Source (Python 3.9+)
 Clone or download this repository, then install with pip:
 ```bash
+git clone https://github.com/yadavharshit448-png/zeroextract.git
+cd zeroextract
 pip install -e .
 ```
 
-### Option 2: Portable / No Installation Needed
+### Option 3: Portable / No Installation Needed
 Run directly with Python:
 ```bash
 python -m zeroextract --help
 ```
-or on Windows, use the included launcher batch script:
-```cmd
-zeroextract.bat --help
+or launch the desktop GUI:
+```bash
+python -m zeroextract --gui
 ```
 
 ---
@@ -148,9 +158,10 @@ zeroextract "D:\Downloads\BigGame.zip" -o "D:\Games\BigGame"
 | Flag | Short | Description |
 |---|---|---|
 | `--output-dir` | `-o` | Destination directory for extracted game files |
+| `--gui` | | Launch the interactive desktop Graphical User Interface |
 | `--dry-run` | | Simulate extraction without modifying files or shrinking archive |
 | `--no-verify` | | Skip 0-byte preflight verification (start extracting immediately) |
-| `--min-headroom` | | Minimum free disk space cushion in bytes (default: `52428800` / 50 MB) |
+| `--min-headroom` | | Minimum free disk space cushion in bytes (default: `10485760` / 10 MB) |
 | `--chunk-size` | | I/O streaming buffer and sparse cluster chunk size (default: `1048576` / 1 MB) |
 | `--quiet` | `-q` | Suppress interactive progress bar (ideal for scripts/batch) |
 | `--verbose` | `-v` | Output detailed diagnostics |
@@ -173,7 +184,7 @@ zeroextract "D:\Downloads\BigGame.zip" -o "D:\Games\BigGame"
 
 ## 🧪 Comprehensive Verification Suite
 
-ZeroExtract includes an extensive, 4-tier test suite covering 247 test cases:
+ZeroExtract includes an extensive, 4-tier test suite covering 250 test cases:
 
 ```bash
 # Run all unit tests
@@ -184,12 +195,12 @@ python tests/run_e2e_tests.py --tier all
 ```
 
 **Test Coverage Results:**
-- **Unit Tests**: 72 / 72 Passed (100%)
+- **Unit Tests**: 75 / 75 Passed (100%)
 - **Tier 1 (Feature Coverage F1–F14)**: 70 / 70 Passed (100%)
 - **Tier 2 (Boundary & Corner Cases)**: 73 / 73 Passed (100%)
 - **Tier 3 (Subsystem Combinations)**: 18 / 18 Passed (100%)
 - **Tier 4 (Real-World Scenarios)**: 14 / 14 Passed (100%)
-- **Total**: **247 / 247 Passed** (Zero failures, zero skipped)
+- **Total**: **250 / 250 Passed** (Zero failures, zero skipped)
 
 ---
 
