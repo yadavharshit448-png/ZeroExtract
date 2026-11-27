@@ -14,6 +14,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Callable, Generator, List, NamedTuple, Optional
 
 from zeroextract.fs.sparse import SparsePuncher
@@ -167,9 +168,10 @@ class RarSparseExtractor:
             else:
                 raise CorruptionError(f"Unsupported or invalid RAR signature: {sig[:8]!r}")
 
-    def _list_entries_via_unrar(self) -> List[RarFileEntry]:
+    def _list_entries_via_unrar(self, password: Optional[str] = None) -> List[RarFileEntry]:
         """Fall back to parsing entries via unrar vb."""
-        cmd = [self.unrar_bin, "vb", str(self.archive_path)]
+        pwd_flag = f"-p{password}" if password is not None else "-p-"
+        cmd = [self.unrar_bin, "vb", pwd_flag, str(self.archive_path)]
         out = subprocess.check_output(cmd, text=True, errors="replace")
         guard = CorruptionGuard()
         entries = []
@@ -185,6 +187,10 @@ class RarSparseExtractor:
         output_dir: str | os.PathLike,
         progress_cb: Optional[Callable[[str, int, int, int], None]] = None,
         enable_sparse_punch: bool = True,
+        password: Optional[str] = None,
+        on_space_saved: Optional[Callable[[int], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+        on_member_extracted: Optional[Callable[[str], None]] = None,
     ) -> int:
         """Extracts all files member-by-member and punches sparse holes in lockstep.
 
@@ -224,7 +230,12 @@ class RarSparseExtractor:
             except Exception:
                 pass
 
+        pwd_flag = f"-p{password}" if password is not None else "-p-"
+
         for entry in entries:
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("Extraction cancelled by user.")
+
             if entry.is_dir:
                 (out_dir / entry.name).mkdir(parents=True, exist_ok=True)
                 continue
@@ -236,6 +247,7 @@ class RarSparseExtractor:
                 "x",
                 "-y",
                 "-idq",
+                pwd_flag,
                 "-oc",
                 str(self.archive_path),
                 entry.name,
@@ -249,6 +261,7 @@ class RarSparseExtractor:
                     "x",
                     "-y",
                     "-idq",
+                    pwd_flag,
                     str(self.archive_path),
                     entry.name,
                     str(out_dir) + os.sep,
@@ -263,16 +276,20 @@ class RarSparseExtractor:
 
             if progress_cb:
                 progress_cb(entry.name, bytes_done, total_unpacked, total_packed)
+            if on_member_extracted:
+                on_member_extracted(entry.name)
 
             # Punch hole on extracted member's compressed payload in source archive
             if enable_sparse_punch and entry.payload_offset > 0 and entry.packed_size >= 65536:
                 try:
-                    self.puncher.punch_hole(
+                    freed = self.puncher.punch_hole(
                         self.archive_path,
                         offset=entry.payload_offset,
                         length=entry.packed_size,
                         cluster_size=65536,
                     )
+                    if freed > 0 and on_space_saved is not None:
+                        on_space_saved(freed)
                 except Exception:
                     pass
 

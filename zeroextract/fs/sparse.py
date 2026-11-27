@@ -7,6 +7,8 @@ FSCTL_SET_ZERO_DATA, and FSCTL_QUERY_ALLOCATED_RANGES with 64KB cluster alignmen
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
+import errno
 import os
 import sys
 from contextlib import contextmanager
@@ -18,6 +20,10 @@ FSCTL_SET_SPARSE = 0x000900C4
 FSCTL_SET_ZERO_DATA = 0x000980C8
 FSCTL_QUERY_ALLOCATED_RANGES = 0x000940CF
 FILE_SUPPORTS_SPARSE_FILES = 0x00000040
+
+# Linux fallocate Constants
+FALLOC_FL_KEEP_SIZE = 0x01
+FALLOC_FL_PUNCH_HOLE = 0x02
 
 # File Access & Sharing Flags
 GENERIC_READ = 0x80000000
@@ -121,6 +127,22 @@ if sys.platform == "win32":
     ]
     _kernel32.GetFileSizeEx.restype = wintypes.BOOL
 
+_libc = None
+if sys.platform.startswith("linux"):
+    try:
+        _libc_name = ctypes.util.find_library("c") or "libc.so.6"
+        _libc = ctypes.CDLL(_libc_name, use_errno=True)
+        if hasattr(_libc, "fallocate"):
+            _libc.fallocate.argtypes = [
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int64,
+                ctypes.c_int64,
+            ]
+            _libc.fallocate.restype = ctypes.c_int
+    except OSError:
+        _libc = None
+
 
 def get_win_error_message(error_code: int) -> str:
     """Formats a Windows system error code into a descriptive message."""
@@ -156,10 +178,11 @@ def get_volume_root(path: str | os.PathLike) -> str:
 
 
 class SparsePuncher:
-    """Manages Windows sparse file operations and hole punching."""
+    """Manages Windows NTFS/ReFS and Linux fallocate sparse file operations."""
 
-    def __init__(self, kernel32_dll: Any = None) -> None:
+    def __init__(self, kernel32_dll: Any = None, libc_cdll: Any = None) -> None:
         self._k32 = kernel32_dll or _kernel32
+        self._libc = libc_cdll or _libc
 
     def is_sparse_supported(self, path: str | os.PathLike) -> bool:
         """Queries volume filesystem flags to check if sparse files are supported.
@@ -171,7 +194,7 @@ class SparsePuncher:
             True if volume supports sparse files, False otherwise.
         """
         if self._k32 is None:
-            return False
+            return bool(self._libc is not None and hasattr(self._libc, "fallocate"))
 
         root = get_volume_root(path)
         vol_name = ctypes.create_unicode_buffer(261)
@@ -211,7 +234,9 @@ class SparsePuncher:
             SparseError: If setting sparse attribute fails.
         """
         if self._k32 is None:
-            raise SparseError("Sparse files are only supported on Windows.")
+            if self._libc is not None and hasattr(self._libc, "fallocate"):
+                return True
+            raise SparseError("Sparse files are only supported on Windows or Linux.")
 
         with self._resolve_handle(file_path_or_handle, access=GENERIC_READ | GENERIC_WRITE) as h:
             bytes_returned = wintypes.DWORD(0)
@@ -261,8 +286,8 @@ class SparsePuncher:
         if length == 0:
             return 0
 
-        if self._k32 is None:
-            raise SparseError("Sparse hole punching is only supported on Windows.")
+        if self._k32 is None and not (self._libc is not None and hasattr(self._libc, "fallocate")):
+            raise SparseError("Sparse hole punching is only supported on Windows or Linux.")
 
         # Compute cluster-aligned deallocation range
         # Start offset aligns UP to ensure no preceding bytes are destroyed.
@@ -277,6 +302,9 @@ class SparsePuncher:
         if aligned_end <= aligned_start:
             # Region smaller than a single cluster or spans partial clusters
             return 0
+
+        if self._k32 is None:
+            return self._punch_hole_linux(file_path_or_handle, aligned_start, aligned_end - aligned_start)
 
         with self._resolve_handle(file_path_or_handle, access=GENERIC_READ | GENERIC_WRITE) as h:
             # Ensure marked as sparse
@@ -333,7 +361,9 @@ class SparsePuncher:
             List of (offset, length) tuples of allocated physical byte ranges.
         """
         if self._k32 is None:
-            raise SparseError("Allocated range query is only supported on Windows.")
+            if sys.platform.startswith("linux") and hasattr(os, "SEEK_DATA") and hasattr(os, "SEEK_HOLE"):
+                return self._get_allocated_ranges_linux(file_path_or_handle, query_offset, query_length)
+            raise SparseError("Allocated range query is only supported on Windows or Linux.")
 
         with self._resolve_handle(file_path_or_handle, access=GENERIC_READ) as h:
             if query_length is None:
@@ -448,3 +478,79 @@ class SparsePuncher:
                 yield file_path_or_handle
         else:
             yield file_path_or_handle
+
+    @contextmanager
+    def _resolve_fd(self, file_path_or_handle: Any, flags: int = os.O_RDWR) -> Generator[int, None, None]:
+        """Context manager resolving path, file object, or int fd to a POSIX file descriptor."""
+        if isinstance(file_path_or_handle, (str, bytes, os.PathLike)):
+            fd = os.open(os.fspath(file_path_or_handle), flags)
+            try:
+                yield fd
+            finally:
+                os.close(fd)
+        elif hasattr(file_path_or_handle, "fileno"):
+            yield file_path_or_handle.fileno()
+        elif isinstance(file_path_or_handle, int):
+            yield file_path_or_handle
+        else:
+            raise SparseError(f"Unsupported file handle type: {type(file_path_or_handle)}")
+
+    def _punch_hole_linux(self, file_path_or_handle: Any, offset: int, length: int) -> int:
+        """Punches a sparse hole on Linux via fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)."""
+        with self._resolve_fd(file_path_or_handle, os.O_RDWR) as fd:
+            ctypes.set_errno(0)
+            ret = self._libc.fallocate(
+                fd,
+                FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                ctypes.c_int64(offset),
+                ctypes.c_int64(length),
+            )
+            if ret != 0:
+                err = ctypes.get_errno()
+                raise SparseError(
+                    f"fallocate(FALLOC_FL_PUNCH_HOLE) failed for range [{offset}, {offset + length}): "
+                    f"[{err}] {os.strerror(err)}",
+                    win_error=err,
+                )
+        return length
+
+    def _get_allocated_ranges_linux(
+        self,
+        file_path_or_handle: Any,
+        query_offset: int = 0,
+        query_length: int | None = None,
+    ) -> list[tuple[int, int]]:
+        """Queries allocated data ranges on Linux using lseek(SEEK_DATA / SEEK_HOLE)."""
+        with self._resolve_fd(file_path_or_handle, os.O_RDONLY) as fd:
+            file_size = os.fstat(fd).st_size
+            end_limit = file_size if query_length is None else min(file_size, query_offset + query_length)
+            if query_offset >= end_limit:
+                return []
+
+            ranges: list[tuple[int, int]] = []
+            pos = query_offset
+            while pos < end_limit:
+                try:
+                    data_start = os.lseek(fd, pos, os.SEEK_DATA)
+                except OSError as exc:
+                    if exc.errno == errno.ENXIO:
+                        break
+                    raise SparseError(f"lseek(SEEK_DATA) failed: {exc}") from exc
+
+                if data_start >= end_limit:
+                    break
+
+                try:
+                    hole_start = os.lseek(fd, data_start, os.SEEK_HOLE)
+                except OSError as exc:
+                    if exc.errno == errno.ENXIO:
+                        hole_start = end_limit
+                    else:
+                        raise SparseError(f"lseek(SEEK_HOLE) failed: {exc}") from exc
+
+                region_end = min(hole_start, end_limit)
+                if region_end > data_start:
+                    ranges.append((data_start, region_end - data_start))
+                pos = region_end
+
+            return ranges

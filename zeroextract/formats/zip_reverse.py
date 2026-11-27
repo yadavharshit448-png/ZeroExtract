@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import struct
 import sys
+import threading
 from typing import Any, BinaryIO, Callable, Optional
 import zlib
 
@@ -130,6 +131,31 @@ def _read_exact(f: BinaryIO, length: int) -> bytes:
     return b"".join(parts)
 
 
+class _ZipCryptoDecrypter:
+    """Streaming PKWARE traditional ZipCrypto decrypter."""
+
+    def __init__(self, password: bytes) -> None:
+        self.key0 = 0x12345678
+        self.key1 = 0x23456789
+        self.key2 = 0x34567890
+        for byte in password:
+            self._update_keys(byte)
+
+    def _update_keys(self, c: int) -> None:
+        self.key0 = (~zlib.crc32(bytes([c]), ~self.key0)) & 0xFFFFFFFF
+        self.key1 = ((self.key1 + (self.key0 & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
+        self.key2 = (~zlib.crc32(bytes([(self.key1 >> 24) & 0xFF]), ~self.key2)) & 0xFFFFFFFF
+
+    def decrypt(self, data: bytes) -> bytes:
+        out = bytearray(len(data))
+        for i, enc_byte in enumerate(data):
+            temp = (self.key2 | 2) & 0xFFFF
+            dec_byte = enc_byte ^ (((temp * (temp ^ 1)) >> 8) & 0xFF)
+            self._update_keys(dec_byte)
+            out[i] = dec_byte
+        return bytes(out)
+
+
 class ZipReverseExtractor:
     """Central Directory caching and tail-to-head reverse extractor with lockstep truncation."""
 
@@ -147,8 +173,10 @@ class ZipReverseExtractor:
         entries: list[ZipEntry] | None = None,
         enable_intra_entry_sparse: bool = True,
         sparse_punch_threshold: int = DEFAULT_SPARSE_THRESHOLD,
+        password: str | None = None,
     ) -> None:
         self.archive_path = os.fspath(archive_path) if archive_path is not None else None
+        self.password = password
         if truncator is not None:
             self.truncator = truncator
         elif reclaimer is not None and hasattr(reclaimer, "truncator"):
@@ -399,6 +427,8 @@ class ZipReverseExtractor:
         archive_file: BinaryIO | None = None,
         enable_sparse: bool = False,
         on_bytes_progress: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+        on_space_saved: Optional[Callable[[int], None]] = None,
     ) -> str:
         """Extracts a single entry, validates CRC32, and atomically stages the file."""
         out_root = Path(output_dir).resolve()
@@ -408,6 +438,15 @@ class ZipReverseExtractor:
         if entry.is_dir:
             target.mkdir(parents=True, exist_ok=True)
             return str(target)
+
+        is_encrypted = bool(entry.flag_bits & 0x01)
+        if is_encrypted and self.password is None:
+            raise ZipFormatError(f"Entry '{entry.filename}' is encrypted; password required.")
+
+        if entry.compression_method == 99 and is_encrypted:
+            return self._extract_aes_entry(
+                entry, target, on_bytes_progress=on_bytes_progress
+            )
 
         if entry.compression_method not in (0, 8):
             raise UnsupportedCompressionError(
@@ -453,6 +492,21 @@ class ZipReverseExtractor:
             remaining_comp = entry.compressed_size
             stream_pos = data_offset
 
+            decrypter: _ZipCryptoDecrypter | None = None
+            if is_encrypted:
+                assert self.password is not None
+                if remaining_comp < 12:
+                    raise CorruptArchiveError(
+                        f"Encrypted entry '{entry.filename}' is truncated (missing 12-byte header)."
+                    )
+                decrypter = _ZipCryptoDecrypter(self.password.encode("utf-8"))
+                enc_hdr = decrypter.decrypt(_read_exact(f, 12))
+                remaining_comp -= 12
+                stream_pos += 12
+                check_byte = (entry.mod_time >> 8) & 0xFF if (entry.flag_bits & 0x08) else (entry.crc32 >> 24) & 0xFF
+                if enc_hdr[11] != check_byte:
+                    raise ZipFormatError(f"Incorrect password for entry '{entry.filename}'.")
+
             cluster_size = self.SPARSE_CLUSTER_SIZE
             last_punched_end = ((data_offset + cluster_size - 1) // cluster_size) * cluster_size
             punch_batch = ((max(self.chunk_size, 2 * 1024 * 1024) + cluster_size - 1) // cluster_size) * cluster_size
@@ -471,6 +525,8 @@ class ZipReverseExtractor:
 
             with open(target_str, "wb") as out_f:
                 while remaining_comp > 0:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise InterruptedError("Extraction cancelled by user.")
                     read_len = min(self.chunk_size, remaining_comp)
                     chunk = _read_exact(f, read_len)
                     if len(chunk) < read_len:
@@ -479,6 +535,9 @@ class ZipReverseExtractor:
                         )
                     remaining_comp -= len(chunk)
                     stream_pos += len(chunk)
+
+                    if decrypter is not None:
+                        chunk = decrypter.decrypt(chunk)
 
                     if decompressor is None:
                         out_chunk = chunk
@@ -502,8 +561,10 @@ class ZipReverseExtractor:
                         pending_len = aligned_end - last_punched_end
                         if pending_len >= punch_batch or (remaining_comp == 0 and pending_len > 0):
                             try:
-                                self.puncher.punch_hole(f, last_punched_end, pending_len, cluster_size=cluster_size)
+                                punched = self.puncher.punch_hole(f, last_punched_end, pending_len, cluster_size=cluster_size)
                                 last_punched_end = aligned_end
+                                if punched > 0 and on_space_saved is not None:
+                                    on_space_saved(punched)
                             except (SparseError, OSError) as exc:
                                 logger.warning("Intra-entry sparse punch failed for '%s': %s", entry.filename, exc)
                                 sparse_active = False
@@ -567,12 +628,45 @@ class ZipReverseExtractor:
             if close_after:
                 f.close()
 
+    def _extract_aes_entry(
+        self,
+        entry: ZipEntry,
+        target: Path,
+        on_bytes_progress: Optional[Callable[[int, str], None]] = None,
+    ) -> str:
+        """Extracts an AES-encrypted ZIP entry via pyzipper if installed."""
+        if self.archive_path is None:
+            raise ValueError("archive_path must be specified for AES-ZIP extraction")
+        try:
+            import pyzipper  # type: ignore
+        except ImportError as exc:
+            raise UnsupportedCompressionError(
+                f"Entry '{entry.filename}' uses AES encryption; install 'pyzipper' to extract AES-ZIP."
+            ) from exc
+
+        assert self.password is not None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = target.with_name(target.name + ".unpack_part")
+        with pyzipper.AESZipFile(self.archive_path, "r") as azf:
+            azf.setpassword(self.password.encode("utf-8"))
+            with azf.open(entry.filename) as src, open(temp_target, "wb") as dst:
+                while chunk := src.read(self.chunk_size):
+                    dst.write(chunk)
+                    if on_bytes_progress is not None:
+                        on_bytes_progress(len(chunk), entry.filename)
+                dst.flush()
+                os.fsync(dst.fileno())
+        os.replace(temp_target, target)
+        return str(target)
+
     def extract_all(
         self,
         output_dir: str | os.PathLike,
         on_progress: Optional[Callable[[ZipEntry, int, int, int, int], None]] = None,
         on_member_extracted: Optional[Callable[[str], None]] = None,
         on_bytes_progress: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+        on_space_saved: Optional[Callable[[int], None]] = None,
     ) -> list[str]:
         """Extracts entries strictly tail-to-head and truncates archive in lockstep."""
         path = self.archive_path
@@ -596,6 +690,8 @@ class ZipReverseExtractor:
 
         with open(path, "r+b", buffering=0) as arch_file:
             for idx, entry in enumerate(entries):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError("Extraction cancelled by user.")
                 target = _sanitize_path(entry.filename, Path(output_dir))
                 if target.exists() and not entry.is_dir and target.stat().st_size == entry.uncompressed_size:
                     extracted_paths.append(str(target))
@@ -609,6 +705,8 @@ class ZipReverseExtractor:
                         archive_file=arch_file,
                         enable_sparse=use_sparse,
                         on_bytes_progress=on_bytes_progress,
+                        cancel_event=cancel_event,
+                        on_space_saved=on_space_saved,
                     )
                     extracted_paths.append(dest_path)
 
@@ -623,6 +721,8 @@ class ZipReverseExtractor:
                 if curr_size > entry.local_header_offset:
                     freed = self.truncator.truncate_tail(arch_file, entry.local_header_offset)
                     cumulative_freed += freed
+                    if freed > 0 and on_space_saved is not None:
+                        on_space_saved(freed)
 
                 if on_progress is not None:
                     on_progress(entry, freed, cumulative_freed, idx + 1, total_count)
@@ -636,6 +736,8 @@ class ZipReverseExtractor:
         on_progress: Optional[Callable] = None,
         on_member_extracted: Optional[Callable[[str], None]] = None,
         on_bytes_progress: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+        on_space_saved: Optional[Callable[[int], None]] = None,
     ) -> list[str]:
         """Convenience method for extraction with optional archive_path override."""
         if archive_path is not None:
@@ -647,4 +749,6 @@ class ZipReverseExtractor:
             on_progress=on_progress,
             on_member_extracted=on_member_extracted,
             on_bytes_progress=on_bytes_progress,
+            cancel_event=cancel_event,
+            on_space_saved=on_space_saved,
         )

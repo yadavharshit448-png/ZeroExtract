@@ -19,6 +19,11 @@ from zeroextract.formats.rar_sparse import (
     RarSparseExtractor,
     is_rar_file,
 )
+from zeroextract.formats.sevenz_sparse import (
+    SevenZFileEntry,
+    SevenZSparseExtractor,
+    is_7z_file,
+)
 from zeroextract.formats.zip_reverse import (
     BadZipSignatureError,
     ChecksumError,
@@ -46,4 +51,7 @@ __all__ = [
     "RarSparseExtractor",
     "is_rar_file",
     "RarFileEntry",
+    "SevenZSparseExtractor",
+    "is_7z_file",
+    "SevenZFileEntry",
 ]

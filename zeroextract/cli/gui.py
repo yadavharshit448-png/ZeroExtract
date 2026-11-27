@@ -12,15 +12,58 @@ from typing import Optional
 
 try:
     import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
     HAS_TKINTER = True
 except ImportError:
     HAS_TKINTER = False
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD  # type: ignore
+    HAS_TKDND = True
+except ImportError:
+    HAS_TKDND = False
 
 from zeroextract import __version__
 from zeroextract.cli.ui import TerminalUI
 from zeroextract.cli.windows_setup import normalize_windows_path
 from zeroextract.fs.headroom import HeadroomMonitor
+
+
+def _format_bytes_human(num_bytes: int) -> str:
+    """Formats a byte count into a human-readable string."""
+    size = float(max(0, num_bytes))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} B"
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{int(num_bytes)} B"
+
+
+def _parse_drop_paths(raw_data: str) -> list[str]:
+    """Parses TkDND drop payload (handles braced paths with spaces)."""
+    paths: list[str] = []
+    buf = ""
+    in_braces = False
+    for ch in raw_data:
+        if ch == "{":
+            in_braces = True
+            buf = ""
+        elif ch == "}":
+            in_braces = False
+            if buf:
+                paths.append(buf)
+                buf = ""
+        elif ch == " " and not in_braces:
+            if buf:
+                paths.append(buf)
+                buf = ""
+        else:
+            buf += ch
+    if buf:
+        paths.append(buf)
+    return paths
 
 
 def launch_gui(initial_archive: str | None = None) -> int:
@@ -29,10 +72,10 @@ def launch_gui(initial_archive: str | None = None) -> int:
         print("[ERROR] Tkinter is not available in this Python environment.", file=sys.stderr)
         return 1
 
-    root = tk.Tk()
+    root = TkinterDnD.Tk() if HAS_TKDND else tk.Tk()
     root.title(f"ZeroExtract v{__version__} - Zero-Extra-Space Extractor")
-    root.geometry("680x560")
-    root.minsize(580, 480)
+    root.geometry("700x620")
+    root.minsize(600, 520)
 
     # Set icon if available
     icon_path = Path(__file__).resolve().parent.parent.parent / "zeroextract.ico"
@@ -52,14 +95,32 @@ def launch_gui(initial_archive: str | None = None) -> int:
     # Variables
     archive_var = tk.StringVar(value=normalize_windows_path(initial_archive or ""))
     output_dir_var = tk.StringVar()
+    password_var = tk.StringVar()
+    show_password_var = tk.BooleanVar(value=False)
     preverify_var = tk.BooleanVar(value=True)
     dry_run_var = tk.BooleanVar(value=False)
-    status_var = tk.StringVar(value="Select an archive file to begin.")
+    status_var = tk.StringVar(value="Select or drop an archive file to begin.")
     speed_eta_var = tk.StringVar(value="")
     free_space_var = tk.StringVar(value="")
+    peak_saved_var = tk.StringVar(value="Peak Space Saved: 0 B")
 
     log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
     is_extracting = False
+    cancel_event = threading.Event()
+    peak_saved_bytes = 0
+    saved_lock = threading.Lock()
+
+    def load_archive_path(raw_path: str) -> None:
+        if is_extracting:
+            return
+        cleaned = normalize_windows_path(raw_path)
+        if not cleaned:
+            return
+        archive_var.set(cleaned)
+        p = Path(cleaned)
+        if not output_dir_var.get().strip():
+            output_dir_var.set(str(p.parent / p.stem))
+        update_free_space()
 
     def update_free_space() -> None:
         target = output_dir_var.get().strip() or archive_var.get().strip()
@@ -88,11 +149,7 @@ def launch_gui(initial_archive: str | None = None) -> int:
             ],
         )
         if filename:
-            archive_var.set(filename)
-            if not output_dir_var.get():
-                p = Path(filename)
-                output_dir_var.set(str(p.parent / p.stem))
-            update_free_space()
+            load_archive_path(filename)
 
     def browse_output() -> None:
         if is_extracting:
@@ -139,11 +196,36 @@ def launch_gui(initial_archive: str | None = None) -> int:
     browse_out_btn = ttk.Button(file_frame, text="Browse...", command=browse_output)
     browse_out_btn.grid(row=1, column=2, padx=2, pady=4)
 
+    # Password Row (optional)
+    ttk.Label(file_frame, text="Password (optional):").grid(row=2, column=0, sticky="w", pady=4)
+    pwd_entry = ttk.Entry(file_frame, textvariable=password_var, show="*", width=50)
+    pwd_entry.grid(row=2, column=1, sticky="ew", padx=6, pady=4)
+
+    def toggle_password() -> None:
+        pwd_entry.configure(show="" if show_password_var.get() else "*")
+
+    show_pwd_chk = ttk.Checkbutton(file_frame, text="Show", variable=show_password_var, command=toggle_password)
+    show_pwd_chk.grid(row=2, column=2, padx=2, pady=4, sticky="w")
+
     file_frame.columnconfigure(1, weight=1)
 
-    # Free Space Indicator
-    headroom_lbl = ttk.Label(main_frame, textvariable=free_space_var, font=("Segoe UI", 8, "italic"), foreground="#007acc")
-    headroom_lbl.pack(anchor="w", pady=(0, 6))
+    if HAS_TKDND:
+        try:
+            root.drop_target_register(DND_FILES)  # type: ignore[attr-defined]
+            root.dnd_bind(  # type: ignore[attr-defined]
+                "<<Drop>>",
+                lambda e: load_archive_path(_parse_drop_paths(e.data)[0]) if _parse_drop_paths(e.data) else None,
+            )
+        except Exception:
+            pass
+
+    # Free Space & Peak Space Saved Indicators
+    metrics_frame = ttk.Frame(main_frame)
+    metrics_frame.pack(fill=tk.X, pady=(0, 6))
+    headroom_lbl = ttk.Label(metrics_frame, textvariable=free_space_var, font=("Segoe UI", 8, "italic"), foreground="#007acc")
+    headroom_lbl.pack(side=tk.LEFT)
+    peak_saved_lbl = ttk.Label(metrics_frame, textvariable=peak_saved_var, font=("Segoe UI", 8, "bold"), foreground="#2e7d32")
+    peak_saved_lbl.pack(side=tk.RIGHT)
 
     # Options Frame
     opts_frame = ttk.Frame(main_frame)
@@ -176,13 +258,23 @@ def launch_gui(initial_archive: str | None = None) -> int:
     speed_lbl = ttk.Label(prog_frame, textvariable=speed_eta_var, font=("Segoe UI", 8))
     speed_lbl.pack(anchor="e")
 
-    # Start Action Button
+    # Action Buttons (Extract + Safe Cancel/Pause)
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.pack(fill=tk.X, pady=(0, 10))
+
     action_btn = ttk.Button(
-        main_frame,
-        text="🚀 Extract Archive (Saves Disk Space)",
+        btn_frame,
+        text="Extract Archive (Saves Disk Space)",
         style="Accent.TButton",
     )
-    action_btn.pack(fill=tk.X, ipady=6, pady=(0, 10))
+    action_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6, padx=(0, 6))
+
+    cancel_btn = ttk.Button(
+        btn_frame,
+        text="Pause / Cancel",
+        state=tk.DISABLED,
+    )
+    cancel_btn.pack(side=tk.RIGHT, ipady=6)
 
     # Activity Log
     log_frame = ttk.LabelFrame(main_frame, text=" Activity Log ", padding=8)
@@ -209,13 +301,23 @@ def launch_gui(initial_archive: str | None = None) -> int:
 
     # Extraction Worker Thread
     def extraction_worker() -> None:
-        nonlocal is_extracting
+        nonlocal is_extracting, peak_saved_bytes
         arch_p = archive_var.get().strip()
         out_p = output_dir_var.get().strip()
+        pwd_val = password_var.get() or None
         is_dry = dry_run_var.get()
         no_ver = not preverify_var.get()
 
         from zeroextract.cli.main import extract_single_archive
+
+        def record_space_saved(delta: int) -> None:
+            nonlocal peak_saved_bytes
+            if delta <= 0:
+                return
+            with saved_lock:
+                peak_saved_bytes += delta
+                total_saved = peak_saved_bytes
+            root.after(0, lambda s=total_saved: peak_saved_var.set(f"Peak Space Saved: {_format_bytes_human(s)}"))
 
         class GuiUI(TerminalUI):
             def render_info(self, msg: str) -> None:
@@ -251,6 +353,9 @@ def launch_gui(initial_archive: str | None = None) -> int:
                 chunk_size=1048576,
                 min_headroom=10 * 1024 * 1024,
                 ui=gui_ui,
+                password=pwd_val,
+                cancel_event=cancel_event,
+                on_space_saved=record_space_saved,
             )
 
             if exit_code == 0:
@@ -260,6 +365,8 @@ def launch_gui(initial_archive: str | None = None) -> int:
                     "Extraction Complete",
                     "Game archive extracted successfully!\n\nPhysical disk space was recycled in-place."
                 ))
+            elif exit_code == 130:
+                root.after(0, lambda: status_var.set("Paused safely. Click Extract to resume from .unpack_journal.json."))
             else:
                 root.after(0, lambda: status_var.set("Extraction halted with errors."))
                 root.after(0, lambda: messagebox.showerror(
@@ -271,12 +378,21 @@ def launch_gui(initial_archive: str | None = None) -> int:
             root.after(0, lambda: messagebox.showerror("Fatal Error", f"Unhandled exception: {exc}"))
         finally:
             is_extracting = False
+            cancel_event.clear()
             root.after(0, lambda: action_btn.configure(state=tk.NORMAL))
+            root.after(0, lambda: cancel_btn.configure(state=tk.DISABLED))
             root.after(0, lambda: browse_arch_btn.configure(state=tk.NORMAL))
             root.after(0, lambda: browse_out_btn.configure(state=tk.NORMAL))
 
+    def on_cancel_clicked() -> None:
+        if not is_extracting:
+            return
+        cancel_event.set()
+        cancel_btn.configure(state=tk.DISABLED)
+        status_var.set("Pausing extraction safely (saving journal for resume)...")
+
     def on_start_clicked() -> None:
-        nonlocal is_extracting
+        nonlocal is_extracting, peak_saved_bytes
         if is_extracting:
             return
 
@@ -293,8 +409,27 @@ def launch_gui(initial_archive: str | None = None) -> int:
             p = Path(arch_p)
             output_dir_var.set(str(p.parent / p.stem))
 
+        # Prompt for password if archive is encrypted and password field is empty
+        if not password_var.get() and preverify_var.get():
+            from zeroextract.safety.preverify import PreflightShield
+            ok, errs = PreflightShield().verify_archive(arch_p)
+            if not ok and any("password" in e.lower() or "encrypted" in e.lower() for e in errs):
+                entered = simpledialog.askstring(
+                    "Archive Password Required",
+                    f"'{Path(arch_p).name}' is password-protected.\nEnter archive password:",
+                    show="*",
+                    parent=root,
+                )
+                if entered is None:
+                    return
+                password_var.set(entered)
+
+        cancel_event.clear()
+        peak_saved_bytes = 0
+        peak_saved_var.set("Peak Space Saved: 0 B")
         is_extracting = True
         action_btn.configure(state=tk.DISABLED)
+        cancel_btn.configure(state=tk.NORMAL)
         browse_arch_btn.configure(state=tk.DISABLED)
         browse_out_btn.configure(state=tk.DISABLED)
         progress_bar.configure(value=0)
@@ -304,6 +439,7 @@ def launch_gui(initial_archive: str | None = None) -> int:
         t.start()
 
     action_btn.configure(command=on_start_clicked)
+    cancel_btn.configure(command=on_cancel_clicked)
 
     # Initial updates
     update_free_space()

@@ -252,6 +252,21 @@ class ReverseTruncator:
                     f"Fallback truncate verification failed: expected {new_size}, got {final_size}"
                 )
             return initial_size - new_size
+        elif isinstance(file_path_or_handle, int):
+            initial_size = os.fstat(file_path_or_handle).st_size
+            if new_size >= initial_size:
+                return 0
+            os.ftruncate(file_path_or_handle, new_size)
+            try:
+                os.fsync(file_path_or_handle)
+            except OSError:
+                pass
+            final_size = os.fstat(file_path_or_handle).st_size
+            if final_size != new_size:
+                raise TruncateError(
+                    f"Fallback ftruncate verification failed: expected {new_size}, got {final_size}"
+                )
+            return initial_size - new_size
         else:
             raise TruncateError(f"Unsupported file_path_or_handle type: {type(file_path_or_handle)}")
 

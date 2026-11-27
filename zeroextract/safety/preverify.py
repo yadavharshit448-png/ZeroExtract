@@ -25,12 +25,14 @@ class PreflightShield:
         self,
         archive_path: str | os.PathLike,
         skip_preflight: bool = False,
+        password: str | None = None,
     ) -> tuple[bool, list[str]]:
         """Verifies archive integrity without writing any data to disk.
 
         Args:
             archive_path: Path to target archive file.
             skip_preflight: If True, bypasses pre-verification and returns (True, []).
+            password: Optional password for encrypted archives.
 
         Returns:
             Tuple of (is_valid: bool, errors: list[str]).
@@ -55,7 +57,10 @@ class PreflightShield:
                 sig8 = f.read(8)
                 if sig8.startswith(b"Rar!\x1a\x07"):
                     # RAR Archive Preflight Verification
-                    return self._verify_rar_archive(p)
+                    return self._verify_rar_archive(p, password=password)
+                if sig8[:6] == b"7z\xbc\xaf\x27\x1c":
+                    # 7z Archive Preflight Verification
+                    return self._verify_7z_archive(p, password=password)
 
                 magic = sig8[:4]
                 if not (magic.startswith(b"PK\x03\x04") or magic.startswith(b"PK\x05\x06") or magic.startswith(b"PK\x07\x08")):
@@ -98,8 +103,8 @@ class PreflightShield:
                     return True, []
 
                 for info in infolist:
-                    # Check encryption flag (bit 0 and strong encryption bit 6)
-                    if info.flag_bits & 0x01 or info.flag_bits & 0x40:
+                    is_encrypted = bool(info.flag_bits & 0x01 or info.flag_bits & 0x40)
+                    if is_encrypted and password is None:
                         errors.append(f"Member '{info.filename}' is encrypted / password-protected")
                         continue
 
@@ -107,11 +112,27 @@ class PreflightShield:
                     computed_crc = 0
                     decompressed_len = 0
                     try:
-                        with zf.open(info) as src:
+                        pwd_bytes = password.encode("utf-8") if (is_encrypted and password is not None) else None
+                        with zf.open(info, pwd=pwd_bytes) as src:
                             while chunk := src.read(self.buffer_size):
                                 computed_crc = zlib.crc32(chunk, computed_crc)
                                 decompressed_len += len(chunk)
                         computed_crc &= 0xFFFFFFFF
+                    except NotImplementedError as e:
+                        if info.compress_type == 99 and password is not None:
+                            aes_ok, aes_errs = self._verify_aes_zip_member(p, info.filename, password)
+                            if not aes_ok:
+                                errors.extend(aes_errs)
+                            continue
+                        errors.append(f"Decompression failure in member '{info.filename}': {e}")
+                        continue
+                    except RuntimeError as e:
+                        msg = str(e)
+                        if "Bad password" in msg or "password" in msg.lower():
+                            errors.append(f"Incorrect password for member '{info.filename}'")
+                        else:
+                            errors.append(f"Decompression failure in member '{info.filename}': {e}")
+                        continue
                     except Exception as e:
                         errors.append(f"Decompression failure in member '{info.filename}': {e}")
                         continue
@@ -133,7 +154,49 @@ class PreflightShield:
         is_valid = len(errors) == 0
         return is_valid, errors
 
-    def _verify_rar_archive(self, archive_path: Path) -> tuple[bool, list[str]]:
+    def _verify_aes_zip_member(
+        self, archive_path: Path, member_name: str, password: str
+    ) -> tuple[bool, list[str]]:
+        """Verifies an AES-encrypted ZIP member using pyzipper or 7z if available."""
+        import shutil
+        import subprocess
+
+        try:
+            import pyzipper  # type: ignore
+
+            with pyzipper.AESZipFile(archive_path, "r") as azf:
+                azf.setpassword(password.encode("utf-8"))
+                with azf.open(member_name) as src:
+                    while src.read(self.buffer_size):
+                        pass
+            return True, []
+        except ImportError:
+            pass
+        except Exception as exc:
+            return False, [f"AES-ZIP verification failed for '{member_name}': {exc}"]
+
+        sevenz_bin = None
+        for cand in [r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"]:
+            if os.path.isfile(cand):
+                sevenz_bin = cand
+                break
+        if not sevenz_bin:
+            sevenz_bin = shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
+
+        if sevenz_bin:
+            res = subprocess.run(
+                [sevenz_bin, "t", f"-p{password}", str(archive_path), member_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if res.returncode == 0:
+                return True, []
+            err = res.stderr.decode("utf-8", errors="replace").strip()
+            return False, [f"AES-ZIP verification failed for '{member_name}': {err or 'wrong password or corruption'}"]
+
+        return False, [f"Member '{member_name}' uses AES encryption (install pyzipper or 7z to verify)"]
+
+    def _verify_rar_archive(self, archive_path: Path, password: str | None = None) -> tuple[bool, list[str]]:
         """Verifies RAR archive integrity non-destructively in memory."""
         import shutil
         import subprocess
@@ -148,9 +211,10 @@ class PreflightShield:
             unrar_bin = shutil.which("unrar") or shutil.which("UnRAR")
 
         if unrar_bin:
+            pwd_flag = f"-p{password}" if password is not None else "-p-"
             try:
                 res = subprocess.run(
-                    [unrar_bin, "t", "-idq", str(archive_path)],
+                    [unrar_bin, "t", "-idq", pwd_flag, str(archive_path)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                 )
@@ -158,7 +222,7 @@ class PreflightShield:
                     return True, []
                 else:
                     err = res.stderr.decode("utf-8", errors="replace").strip()
-                    return False, [f"RAR integrity test failed: {err or 'CRC or header corruption detected'}"]
+                    return False, [f"RAR integrity test failed: {err or 'CRC, password, or header corruption detected'}"]
             except Exception as exc:
                 return False, [f"RAR testing error: {exc}"]
 
@@ -172,6 +236,44 @@ class PreflightShield:
             return True, []
         except Exception as e:
             return False, [f"RAR structure error: {e}"]
+
+    def _verify_7z_archive(self, archive_path: Path, password: str | None = None) -> tuple[bool, list[str]]:
+        """Verifies 7z archive integrity non-destructively."""
+        import shutil
+        import subprocess
+
+        sevenz_bin = None
+        for cand in [r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"]:
+            if os.path.isfile(cand):
+                sevenz_bin = cand
+                break
+        if not sevenz_bin:
+            sevenz_bin = shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
+
+        if sevenz_bin:
+            pwd_flag = f"-p{password}" if password is not None else "-p"
+            try:
+                res = subprocess.run(
+                    [sevenz_bin, "t", pwd_flag, str(archive_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                if res.returncode == 0:
+                    return True, []
+                err = res.stderr.decode("utf-8", errors="replace").strip()
+                return False, [f"7z integrity test failed: {err or 'wrong password or CRC/header corruption'}"]
+            except Exception as exc:
+                return False, [f"7z testing error: {exc}"]
+
+        # Fallback to 32-byte signature header check
+        try:
+            with open(archive_path, "rb") as f:
+                hdr = f.read(32)
+            if len(hdr) < 32 or hdr[:6] != b"7z\xbc\xaf\x27\x1c":
+                return False, ["Invalid 7z signature header"]
+            return True, []
+        except Exception as exc:
+            return False, [f"7z structure error: {exc}"]
 
 
 __all__ = ["PreflightShield"]

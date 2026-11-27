@@ -6,8 +6,9 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import threading
 import time
-from typing import Sequence
+from typing import Callable, Sequence
 import zipfile
 
 from zeroextract import __version__
@@ -15,6 +16,7 @@ from zeroextract.cli.ui import TerminalUI
 from zeroextract.cli.windows_setup import normalize_windows_path
 from zeroextract.formats.multi_volume import MultiVolumeStreamer
 from zeroextract.formats.rar_sparse import RarSparseExtractor, is_rar_file
+from zeroextract.formats.sevenz_sparse import SevenZSparseExtractor, is_7z_file
 from zeroextract.formats.zip_reverse import ZipReverseExtractor
 from zeroextract.fs.headroom import HeadroomMonitor
 from zeroextract.safety.atomic import AtomicWriter
@@ -31,7 +33,14 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "archive",
         nargs="*",
-        help="Path to archive file(s) to extract (supports .zip, .zip64, multi-part splits).",
+        help="Path to archive file(s) to extract (supports .zip, .zip64, .rar, .7z, and multi-part splits).",
+    )
+    parser.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        help="Password for encrypted archives (ZIP, RAR, or 7z).",
     )
     parser.add_argument(
         "-o",
@@ -95,6 +104,9 @@ def extract_single_archive(
     chunk_size: int,
     min_headroom: int,
     ui: TerminalUI,
+    password: str | None = None,
+    cancel_event: threading.Event | None = None,
+    on_space_saved: Callable[[int], None] | None = None,
 ) -> int:
     """Executes the zero-extra-space extraction pipeline on a single archive."""
     normalized_path = normalize_windows_path(archive_path_str)
@@ -132,13 +144,14 @@ def extract_single_archive(
     if not no_verify and not is_multi and not is_resumption:
         ui.render_info(f"Running 0-byte preflight verification on {archive_path.name}...")
         shield = PreflightShield(buffer_size=chunk_size)
-        is_valid, errors = shield.verify_archive(archive_path)
+        is_valid, errors = shield.verify_archive(archive_path, password=password)
         if not is_valid:
             err_details = "; ".join(errors)
             ui.render_error(f"Archive corruption detected in '{archive_path.name}': {err_details}")
             return 1
 
     is_rar = is_rar_file(archive_path)
+    is_7z = is_7z_file(archive_path)
 
     # Dry-run simulation mode
     if dry_run:
@@ -147,6 +160,15 @@ def extract_single_archive(
                 rar_ext = RarSparseExtractor(archive_path)
                 entries = rar_ext.get_entries()
                 total_uncomp = sum(e.unpacked_size for e in entries)
+                member_count = len(entries)
+            except Exception:
+                member_count = 0
+                total_uncomp = archive_path.stat().st_size
+        elif is_7z:
+            try:
+                sevenz_ext = SevenZSparseExtractor(archive_path)
+                entries = sevenz_ext.get_entries(password=password)
+                total_uncomp = sum(e.size for e in entries)
                 member_count = len(entries)
             except Exception:
                 member_count = 0
@@ -179,6 +201,13 @@ def extract_single_archive(
                 f"is below the required safety threshold of {min_headroom} bytes."
             )
             return 1
+    except InterruptedError:
+        try:
+            journal.close(success=False)
+        except Exception:
+            pass
+        ui.render_info("Extraction paused/cancelled by user. Progress saved to .unpack_journal.json for resume.")
+        return 130
     except Exception as exc:
         ui.render_error(f"Headroom check failure: {exc}")
         return 1
@@ -196,7 +225,7 @@ def extract_single_archive(
 
     try:
         if is_rar:
-            ui.render_info(f"Extracting RAR archive in-place with NTFS sparse hole-punching: {archive_path.name}...")
+            ui.render_info(f"Extracting RAR archive in-place with sparse hole-punching: {archive_path.name}...")
             rar_ext = RarSparseExtractor(archive_path)
             def rar_progress(name: str, done: int, total_unp: int, total_pk: int):
                 ui.render_progress(
@@ -204,7 +233,34 @@ def extract_single_archive(
                     total_bytes=max(1, total_unp),
                     current_member=name,
                 )
-            extracted_count = rar_ext.extract(out_dir, progress_cb=rar_progress)
+            extracted_count = rar_ext.extract(
+                out_dir,
+                progress_cb=rar_progress,
+                password=password,
+                on_space_saved=on_space_saved,
+                cancel_event=cancel_event,
+                on_member_extracted=lambda member: journal.mark_completed(member, 0, 0),
+            )
+            ui.render_info(f"Successfully extracted {extracted_count} files from '{archive_path.name}' into '{out_dir}'.")
+            journal.close(success=True)
+            return 0
+        elif is_7z:
+            ui.render_info(f"Extracting 7z archive in-place with sparse hole-punching: {archive_path.name}...")
+            sevenz_ext = SevenZSparseExtractor(archive_path)
+            def sevenz_progress(name: str, done: int, total_unp: int, total_pk: int):
+                ui.render_progress(
+                    current_bytes=done,
+                    total_bytes=max(1, total_unp),
+                    current_member=name,
+                )
+            extracted_count = sevenz_ext.extract(
+                out_dir,
+                progress_cb=sevenz_progress,
+                password=password,
+                on_space_saved=on_space_saved,
+                cancel_event=cancel_event,
+                on_member_extracted=lambda member: journal.mark_completed(member, 0, 0),
+            )
             ui.render_info(f"Successfully extracted {extracted_count} files from '{archive_path.name}' into '{out_dir}'.")
             journal.close(success=True)
             return 0
@@ -234,10 +290,19 @@ def extract_single_archive(
                     )
                     for d in saved_entries
                 ]
-                extractor = ZipReverseExtractor(str(archive_path), chunk_size=chunk_size, entries=planned_zip_entries)
+                extractor = ZipReverseExtractor(
+                    str(archive_path),
+                    chunk_size=chunk_size,
+                    entries=planned_zip_entries,
+                    password=password,
+                )
                 scanned = planned_zip_entries
             else:
-                extractor = ZipReverseExtractor(str(archive_path), chunk_size=chunk_size)
+                extractor = ZipReverseExtractor(
+                    str(archive_path),
+                    chunk_size=chunk_size,
+                    password=password,
+                )
                 scanned = extractor.scan_central_directory()
                 journal.set_planned_entries([
                     {
@@ -280,6 +345,8 @@ def extract_single_archive(
                 output_dir=str(out_dir),
                 on_member_extracted=lambda member: journal.mark_completed(member, 0, 0),
                 on_bytes_progress=zip_bytes_progress,
+                cancel_event=cancel_event,
+                on_space_saved=on_space_saved,
             )
             if total_uncomp > 0:
                 elapsed = max(0.001, time.monotonic() - start_time)
@@ -297,6 +364,13 @@ def extract_single_archive(
         ui.render_info(f"Extraction complete for '{archive_path.name}'.")
         return 0
 
+    except InterruptedError:
+        try:
+            journal.close(success=False)
+        except Exception:
+            pass
+        ui.render_info("Extraction paused/cancelled by user. Progress saved to .unpack_journal.json for resume.")
+        return 130
     except Exception as exc:
         try:
             journal.close(success=False)
@@ -356,6 +430,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             chunk_size=args.chunk_size,
             min_headroom=args.min_headroom,
             ui=ui,
+            password=args.password,
         )
         if code != 0:
             exit_code = code
