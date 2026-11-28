@@ -7,6 +7,8 @@
 [![Tests](https://img.shields.io/badge/Tests-250%20Passed%20(100%25)-brightgreen.svg)]()
 [![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)]()
 
+[Website & Direct Downloads](https://yadavharshit448-png.github.io/ZeroExtract/) &bull; [GitHub Releases](https://github.com/yadavharshit448-png/ZeroExtract/releases/latest) &bull; [Sponsor / Commercial Inquiry](https://yadavharshit448-png.github.io/ZeroExtract/#support)
+
 ---
 
 ## 🎮 The Problem: The "Double Space" Dilemma

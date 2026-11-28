@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZeroExtract — Extract 50GB+ Archives Without 2x Disk Space</title>
+  <meta name="description" content="Free, open-source in-place archive extractor for Windows and Linux. Unpack massive ZIP, RAR, 7z, and split archives without needing double disk space." />
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --surface: #121826;
+      --surface-2: #192234;
+      --border: #26324a;
+      --text: #e6edf7;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --radius: 14px;
+      --max: 1080px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: radial-gradient(1200px 600px at 50% -10%, #172554 0%, var(--bg) 60%);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Nav */
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 0;
+      border-bottom: 1px solid rgba(38, 50, 74, 0.5);
+    }
+    .brand {
+      font-weight: 800;
+      font-size: 1.2rem;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-badge {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+    .nav-links {
+      display: flex;
+      gap: 22px;
+      align-items: center;
+      font-size: 0.94rem;
+    }
+    .nav-links a { color: var(--muted); }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+
+    /* Hero */
+    .hero {
+      padding: 72px 0 48px;
+      text-align: center;
+    }
+    .pill {
+      display: inline-block;
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: rgba(34, 197, 94, 0.12);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      color: #4ade80;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: clamp(2.1rem, 4.6vw, 3.4rem);
+      line-height: 1.12;
+      letter-spacing: -0.03em;
+      margin-bottom: 18px;
+    }
+    .hero p {
+      max-width: 680px;
+      margin: 0 auto 30px;
+      color: var(--muted);
+      font-size: 1.1rem;
+    }
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      justify-content: center;
+      margin-bottom: 14px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 13px 24px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 0.98rem;
+      transition: transform 0.15s ease, filter 0.15s ease;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .btn:hover { transform: translateY(-1px); text-decoration: none; filter: brightness(1.07); }
+    .btn-primary {
+      background: linear-gradient(135deg, #0ea5e9, #2563eb);
+      color: #fff;
+      box-shadow: 0 8px 24px rgba(14, 165, 233, 0.28);
+    }
+    .btn-secondary {
+      background: var(--surface-2);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .btn-sponsor {
+      background: rgba(245, 158, 11, 0.14);
+      color: #fbbf24;
+      border-color: rgba(245, 158, 11, 0.35);
+    }
+    .sub-note {
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    /* Comparison Visual */
+    .compare {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+      margin: 40px 0 64px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+    }
+    .card h3 { font-size: 1.1rem; margin-bottom: 10px; }
+    .bar-wrap {
+      background: #0a0e16;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      height: 22px;
+      overflow: hidden;
+      display: flex;
+      margin: 12px 0;
+    }
+    .bar-used { background: #3b82f6; height: 100%; }
+    .bar-fail { background: rgba(239, 68, 68, 0.75); height: 100%; }
+    .bar-ok { background: rgba(34, 197, 94, 0.75); height: 100%; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86rem; color: var(--muted); }
+
+    /* Features */
+    section { padding: 48px 0; }
+    .section-title {
+      font-size: 1.75rem;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+      text-align: center;
+    }
+    .section-sub {
+      color: var(--muted);
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 18px;
+    }
+    .feat-icon {
+      font-size: 1.4rem;
+      margin-bottom: 10px;
+      display: inline-block;
+    }
+    .card p { color: var(--muted); font-size: 0.94rem; }
+
+    /* Monetization / Support Section */
+    .support-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+    }
+    .tag {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 3px 9px;
+      border-radius: 6px;
+      margin-bottom: 10px;
+    }
+    .tag-free { background: rgba(34, 197, 94, 0.14); color: #4ade80; }
+    .tag-biz { background: rgba(56, 189, 248, 0.14); color: var(--accent); }
+    .tag-aff { background: rgba(245, 158, 11, 0.14); color: #fbbf24; }
+
+    .card ul {
+      margin: 12px 0 18px 18px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .card li { margin-bottom: 6px; }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 28px 0 42px;
+      margin-top: 32px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 16px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <nav>
+      <div class="brand">
+        <span>ZeroExtract</span>
+        <span class="brand-badge">MIT Open Source</span>
+      </div>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#support">Support &amp; Pro</a>
+        <a href="#storage">Low Space?</a>
+        <a href="https://github.com/yadavharshit448-png/ZeroExtract" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </nav>
+
+    <header class="hero">
+      <div class="pill">100% Free &amp; Open Source &bull; No Adware &bull; Direct GitHub Download</div>
+      <h1>Extract 50 GB+ Archives<br />Without 2&times; Disk Space</h1>
+      <p>
+        ZeroExtract unpacks massive <strong>.zip</strong>, <strong>.rar</strong>, <strong>.7z</strong>,
+        and multi-part archives while reclaiming physical disk sectors in real time via
+        tail-truncation and sparse hole-punching.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/yadavharshit448-png/ZeroExtract/releases/latest" target="_blank" rel="noopener">
+          Download Windows .exe (Free)
+        </a>
+        <a class="btn btn-secondary" href="https://github.com/yadavharshit448-png/ZeroExtract#option-2-install-from-source-python-39" target="_blank" rel="noopener">
+          Install CLI (Windows / Linux)
+        </a>
+        <a class="btn btn-sponsor" href="#support">
+          Support the Project
+        </a>
+      </div>
+      <div class="sub-note">
+        Direct from GitHub Releases &bull; Windows 10/11 (NTFS) &amp; Linux (<code>fallocate</code>) &bull; Python 3.9+
+      </div>
+    </header>
+
+    <div class="compare">
+      <div class="card">
+        <h3>Traditional Extractors (WinRAR / 7-Zip)</h3>
+        <p>Unpacks everything first, requiring <strong>2&times; disk space</strong> before you can delete the archive.</p>
+        <div class="bar-wrap" title="100 GB required">
+          <div class="bar-used" style="width: 50%;"></div>
+          <div class="bar-fail" style="width: 50%;"></div>
+        </div>
+        <div class="mono">50 GB archive + 50 GB extracted = 100 GB needed &rarr; Fails on 55 GB free</div>
+      </div>
+      <div class="card">
+        <h3>ZeroExtract (In-Place Space Recycling)</h3>
+        <p>Punches sparse holes &amp; truncates completed bytes in lockstep so peak usage stays near <strong>1&times;</strong>.</p>
+        <div class="bar-wrap" title="~50 GB peak">
+          <div class="bar-ok" style="width: 52%;"></div>
+        </div>
+        <div class="mono">50 GB archive &rarr; ~50 GB peak disk footprint &rarr; Succeeds on 55 GB free</div>
+      </div>
+    </div>
+
+    <section id="features">
+      <h2 class="section-title">Built for Massive Archives &amp; Safety</h2>
+      <p class="section-sub">Verify first, extract atomically, and recover cleanly from interruptions.</p>
+      <div class="grid-3">
+        <div class="card">
+          <span class="feat-icon">&#128737;</span>
+          <h3>0-Byte Preflight Shield</h3>
+          <p>Checks headers, central directories, CRCs, and passwords in memory before modifying a single byte on disk.</p>
+        </div>
+        <div class="card">
+          <span class="feat-icon">&#9986;</span>
+          <h3>Reverse Truncation + Sparse Holes</h3>
+          <p>Uses Win32 <code>FSCTL_SET_ZERO_DATA</code> on NTFS and <code>fallocate(FALLOC_FL_PUNCH_HOLE)</code> on Linux.</p>
+        </div>
+        <div class="card">
+          <span class="feat-icon">&#128230;</span>
+          <h3>ZIP, RAR, 7z &amp; Split Volumes</h3>
+          <p>Supports <code>.zip</code>, <code>.zip64</code>, <code>.rar</code>, <code>.7z</code>, and progressively unlinks <code>.z01</code> / <code>.part1.rar</code> / <code>.001</code> parts.</p>
+        </div>
+        <div class="card">
+          <span class="feat-icon">&#128274;</span>
+          <h3>Password-Protected Archives</h3>
+          <p>Supports <code>--password</code> in CLI and a secure prompt in the GUI for encrypted ZIP, RAR, and 7z files.</p>
+        </div>
+        <div class="card">
+          <span class="feat-icon">&#9208;</span>
+          <h3>Pause &amp; Crash-Safe Resume</h3>
+          <p>Tracks progress in <code>.unpack_journal.json</code> and stages files atomically via <code>.unpack_part</code>.</p>
+        </div>
+        <div class="card">
+          <span class="feat-icon">&#128421;</span>
+          <h3>Desktop GUI &amp; CLI</h3>
+          <p>Includes drag-and-drop GUI, live Peak Space Saved counter, dry-run mode, and Windows Explorer context menu.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="support">
+      <h2 class="section-title">Keep ZeroExtract Free &amp; Sustainable</h2>
+      <p class="section-sub">ZeroExtract is 100% free for personal use. Here is how you can support development or license it for teams.</p>
+      <div class="support-grid">
+        <div class="card">
+          <span class="tag tag-free">For Individuals</span>
+          <h3>Tip / Sponsor Development</h3>
+          <p>Saved your SSD from a full-disk headache? Help fund code-signing certificates and new format support.</p>
+          <ul>
+            <li>100% optional — downloads are always direct &amp; unlocked</li>
+            <li>Funds Windows EV code-signing (no SmartScreen warnings)</li>
+            <li>Priority feature requests on GitHub</li>
+          </ul>
+          <a class="btn btn-sponsor" href="https://github.com/sponsors/yadavharshit448-png" target="_blank" rel="noopener">
+            Sponsor on GitHub
+          </a>
+        </div>
+
+        <div class="card">
+          <span class="tag tag-biz">For Teams &amp; Companies</span>
+          <h3>Commercial Integration &amp; CI/CD</h3>
+          <p>Running tight ephemeral CI runners, ML dataset pipelines, or embedded OTA updaters?</p>
+          <ul>
+            <li>Custom <code>.tar.zst</code> / <code>.tar.gz</code> streaming integrations</li>
+            <li>Game launcher &amp; mod-manager SDK embedding</li>
+            <li>Commercial support, SLA &amp; signed enterprise builds</li>
+          </ul>
+          <a class="btn btn-secondary" href="https://github.com/yadavharshit448-png/ZeroExtract/issues/new?title=Commercial%20Licensing%20%2F%20Integration%20Inquiry" target="_blank" rel="noopener">
+            Request Commercial Inquiry
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <section id="storage">
+      <div class="card">
+        <span class="tag tag-aff">Out of Disk Space?</span>
+        <h3>If Even the Extracted Files Won't Fit</h3>
+        <p style="margin-bottom: 12px;">
+          ZeroExtract eliminates the 2&times; extraction spike, but your drive still needs room for the final unpacked files.
+          If you are permanently out of space, consider offloading old archives to encrypted cloud storage or upgrading to a secondary NVMe SSD.
+        </p>
+        <p class="mono">
+          Tip: Run <code>zeroextract --dry-run your_archive.zip</code> first to see the exact final unpacked size before extracting.
+        </p>
+      </div>
+    </section>
+
+    <footer>
+      <div>ZeroExtract &bull; MIT License &bull; Built for space-constrained drives</div>
+      <div>
+        <a href="https://github.com/yadavharshit448-png/ZeroExtract" target="_blank" rel="noopener">Source Code</a> &bull;
+        <a href="https://github.com/yadavharshit448-png/ZeroExtract/releases" target="_blank" rel="noopener">Releases</a> &bull;
+        <a href="https://github.com/yadavharshit448-png/ZeroExtract/issues" target="_blank" rel="noopener">Report Issue</a>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>
