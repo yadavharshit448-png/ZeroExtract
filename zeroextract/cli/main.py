@@ -202,7 +202,9 @@ def extract_single_archive(
 
     # Disk headroom verification
     monitor = HeadroomMonitor()
-    target_check_dir = out_dir if out_dir.exists() else out_dir.parent
+    target_check_dir = out_dir
+    while not target_check_dir.exists() and target_check_dir.parent != target_check_dir:
+        target_check_dir = target_check_dir.parent
     try:
         free_space = monitor.get_free_space(target_check_dir)
         if free_space < min_headroom:

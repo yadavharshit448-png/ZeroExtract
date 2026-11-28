@@ -491,11 +491,12 @@ class TestF4HeadroomMonitorBoundaries(unittest.TestCase):
 
     def test_path_on_non_existent_drive(self) -> None:
         """Querying disk headroom on a non-existent drive raises OSError on Windows."""
-        invalid_path = "Z:\\nonexistent_zeroextract_drive_12345\\"
         if sys.platform == "win32":
+            invalid_path = "Z:\\nonexistent_zeroextract_drive_12345\\"
             with self.assertRaises(OSError):
                 self.monitor.get_free_space(invalid_path)
         else:
+            invalid_path = "/nonexistent_zeroextract_drive_12345/sub"
             with self.assertRaises(Exception):
                 self.monitor.get_free_space(invalid_path)
 
