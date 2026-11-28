@@ -96,6 +96,16 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _normalize_path(path_str: str) -> str:
+    """Normalizes path strings for the current platform."""
+    if sys.platform == "win32":
+        return normalize_windows_path(path_str)
+    s = path_str.strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    return s
+
+
 def extract_single_archive(
     archive_path_str: str,
     output_dir_str: str | None,
@@ -109,7 +119,7 @@ def extract_single_archive(
     on_space_saved: Callable[[int], None] | None = None,
 ) -> int:
     """Executes the zero-extra-space extraction pipeline on a single archive."""
-    normalized_path = normalize_windows_path(archive_path_str)
+    normalized_path = _normalize_path(archive_path_str)
     archive_path = Path(normalized_path)
 
     if not archive_path.exists():
@@ -118,7 +128,7 @@ def extract_single_archive(
 
     # Resolve destination directory
     if output_dir_str is not None:
-        out_dir = Path(normalize_windows_path(output_dir_str)).resolve()
+        out_dir = Path(_normalize_path(output_dir_str)).resolve()
     else:
         out_dir = (archive_path.parent / archive_path.stem).resolve()
 

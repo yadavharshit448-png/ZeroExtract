@@ -92,8 +92,13 @@ def launch_gui(initial_archive: str | None = None) -> int:
     except Exception:
         pass
 
+    def _norm_path(raw: str) -> str:
+        if sys.platform == "win32":
+            return normalize_windows_path(raw)
+        return raw.strip().strip('"').strip("'")
+
     # Variables
-    archive_var = tk.StringVar(value=normalize_windows_path(initial_archive or ""))
+    archive_var = tk.StringVar(value=_norm_path(initial_archive or ""))
     output_dir_var = tk.StringVar()
     password_var = tk.StringVar()
     show_password_var = tk.BooleanVar(value=False)
@@ -113,7 +118,7 @@ def launch_gui(initial_archive: str | None = None) -> int:
     def load_archive_path(raw_path: str) -> None:
         if is_extracting:
             return
-        cleaned = normalize_windows_path(raw_path)
+        cleaned = _norm_path(raw_path)
         if not cleaned:
             return
         archive_var.set(cleaned)

@@ -144,6 +144,12 @@ if sys.platform.startswith("linux"):
         _libc = None
 
 
+def _get_last_win_error() -> int:
+    """Safely retrieves Win32 last error code (returns 0 on non-Windows)."""
+    getter = getattr(ctypes, "get_last_error", None)
+    return getter() if getter is not None else 0
+
+
 def get_win_error_message(error_code: int) -> str:
     """Formats a Windows system error code into a descriptive message."""
     if _kernel32 is None:
@@ -214,7 +220,7 @@ class SparsePuncher:
             260,
         )
         if not ret:
-            err = ctypes.get_last_error()
+            err = _get_last_win_error()
             raise SparseError(
                 f"GetVolumeInformationW failed for '{root}': [{err}] {get_win_error_message(err)}",
                 win_error=err,
@@ -251,7 +257,7 @@ class SparsePuncher:
                 None,
             )
             if not ret:
-                err = ctypes.get_last_error()
+                err = _get_last_win_error()
                 raise SparseError(
                     f"FSCTL_SET_SPARSE failed: [{err}] {get_win_error_message(err)}",
                     win_error=err,
@@ -335,7 +341,7 @@ class SparsePuncher:
                 None,
             )
             if not ret:
-                err = ctypes.get_last_error()
+                err = _get_last_win_error()
                 raise SparseError(
                     f"FSCTL_SET_ZERO_DATA failed for range [{aligned_start}, {aligned_end}): "
                     f"[{err}] {get_win_error_message(err)}",
@@ -369,7 +375,7 @@ class SparsePuncher:
             if query_length is None:
                 file_size = ctypes.c_int64(0)
                 if not self._k32.GetFileSizeEx(h, ctypes.byref(file_size)):
-                    err = ctypes.get_last_error()
+                    err = _get_last_win_error()
                     raise SparseError(
                         f"GetFileSizeEx failed: [{err}] {get_win_error_message(err)}",
                         win_error=err,
@@ -401,7 +407,7 @@ class SparsePuncher:
                     ctypes.byref(bytes_returned),
                     None,
                 )
-                err = ctypes.get_last_error()
+                err = _get_last_win_error()
 
                 if not ret and err != ERROR_MORE_DATA:
                     raise SparseError(
@@ -453,7 +459,7 @@ class SparsePuncher:
             )
             # Check for INVALID_HANDLE_VALUE (-1 or 0xFFFFFFFFFFFFFFFF)
             if h == INVALID_HANDLE_VALUE or (h is not None and (h & 0xFFFFFFFFFFFFFFFF) == 0xFFFFFFFFFFFFFFFF) or not h:
-                err = ctypes.get_last_error()
+                err = _get_last_win_error()
                 raise SparseError(
                     f"CreateFileW failed for '{path_str}': [{err}] {get_win_error_message(err)}",
                     win_error=err,
